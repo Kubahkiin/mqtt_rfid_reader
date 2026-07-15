@@ -1,0 +1,12 @@
+{
+	"folders": [
+    {
+      "path": "."
+    },
+    {
+      "name": "WS ESP32-P4-NANO Test",
+      "path": "../WS ESP32-P4-NANO Test"
+    }
+  ],
+  "settings": {}
+}

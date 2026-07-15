@@ -1,0 +1,99 @@
+#ifndef Pins_Arduino_h
+#define Pins_Arduino_h
+
+#include <stdint.h>
+#include "soc/soc_caps.h"
+
+// USB-UART bridge
+static const uint8_t TX = 37;
+static const uint8_t RX = 38;
+
+// On-board I2C bus shared by the audio codec and camera control pins.
+static const uint8_t SDA = 7;
+static const uint8_t SCL = 8;
+
+// Exposed header pins chosen as the default Arduino SPI bus aliases.
+static const uint8_t SS = 46;
+static const uint8_t MOSI = 32;
+static const uint8_t MISO = 47;
+static const uint8_t SCK = 36;
+
+static const uint8_t A0 = 16;
+static const uint8_t A1 = 17;
+static const uint8_t A2 = 18;
+static const uint8_t A3 = 19;
+static const uint8_t A4 = 20;
+static const uint8_t A5 = 21;
+static const uint8_t A6 = 22;
+static const uint8_t A7 = 23;
+static const uint8_t A8 = 49;
+static const uint8_t A9 = 50;
+static const uint8_t A10 = 51;
+static const uint8_t A11 = 52;
+static const uint8_t A12 = 53;
+static const uint8_t A13 = 54;
+
+static const uint8_t T0 = 2;
+static const uint8_t T1 = 3;
+static const uint8_t T2 = 4;
+static const uint8_t T3 = 5;
+static const uint8_t T4 = 6;
+static const uint8_t T5 = 7;
+static const uint8_t T6 = 8;
+static const uint8_t T7 = 9;
+static const uint8_t T8 = 10;
+static const uint8_t T9 = 11;
+static const uint8_t T10 = 12;
+static const uint8_t T11 = 13;
+static const uint8_t T12 = 14;
+static const uint8_t T13 = 15;
+
+// 100M Ethernet, IP101GRI PHY, RMII.
+#define ETH_PHY_TYPE    ETH_PHY_IP101
+#define ETH_PHY_ADDR    1
+#define ETH_PHY_MDC     31
+#define ETH_PHY_MDIO    52
+#define ETH_PHY_POWER   51
+#define ETH_RMII_TX_EN  49
+#define ETH_RMII_TX0    34
+#define ETH_RMII_TX1    35
+#define ETH_RMII_RX0    29
+#define ETH_RMII_RX1_EN 30
+#define ETH_RMII_CRS_DV 28
+#define ETH_RMII_CLK    50
+#define ETH_CLK_MODE    EMAC_CLK_EXT_IN
+
+// TF card slot, SDMMC.
+#define BOARD_HAS_SDMMC
+#define BOARD_SDMMC_SLOT           0
+#define BOARD_SDMMC_POWER_CHANNEL  4
+#define BOARD_SDMMC_POWER_PIN      45
+#define BOARD_SDMMC_POWER_ON_LEVEL LOW
+
+// On-chip GP LDO: GPIO 39-48 are powered from LDO VO4 on ESP32-P4.
+#define BOARD_PERIMAN_IO_LDO_AUTO        1
+#define BOARD_PERIMAN_IO_LDO0_CHANNEL    4
+#define BOARD_PERIMAN_IO_LDO0_GPIO_MIN   39
+#define BOARD_PERIMAN_IO_LDO0_GPIO_MAX   48
+#define BOARD_PERIMAN_IO_LDO0_VOLTAGE_MV 3300
+
+// ESP32-C6-MINI-1 Wi-Fi/Bluetooth coprocessor over SDIO.
+#define BOARD_HAS_SDIO_ESP_HOSTED
+#define BOARD_SDIO_ESP_HOSTED_CLK   18
+#define BOARD_SDIO_ESP_HOSTED_CMD   19
+#define BOARD_SDIO_ESP_HOSTED_D0    14
+#define BOARD_SDIO_ESP_HOSTED_D1    15
+#define BOARD_SDIO_ESP_HOSTED_D2    16
+#define BOARD_SDIO_ESP_HOSTED_D3    17
+#define BOARD_SDIO_ESP_HOSTED_RESET 54
+
+// ES8311 audio codec and speaker amplifier.
+#define BOARD_HAS_ES8311
+#define I2S_MCLK  13
+#define I2S_BCLK  12
+#define I2S_LRCLK 10
+#define I2S_DOUT  11
+#define I2S_DIN   9
+#define PA_POWER  53
+
+#endif /* Pins_Arduino_h */
