@@ -22,11 +22,12 @@ constexpr uint32_t RFID_RESPONSE_TIMEOUT_MS = 1000;
 constexpr uint32_t RFID_INVENTORY_TIMEOUT_MS = 4000;
 constexpr uint32_t RFID_TEMPERATURE_INTERVAL_MS = 10000;
 
-// parametry sesji inwentaryzacji.
-constexpr uint8_t RFID_INVENTORY_SESSION_COUNT = 1;
-constexpr uint32_t RFID_INVENTORY_SESSION_DURATION_MS = 7500;
-constexpr uint32_t RFID_INVENTORY_PAUSE_MS = 5000;
-constexpr uint8_t RFID_FAST_SWITCH_REPEAT = 10;
+// Parametry testu sesji EPC Gen2 S0.
+constexpr uint8_t RFID_GEN2_SESSION_COUNT = 1;
+constexpr uint8_t RFID_INVENTORY_TRIALS_PER_SESSION = 5;
+constexpr uint32_t RFID_INVENTORY_TRIAL_DURATION_MS = 5000;
+constexpr uint32_t RFID_INVENTORY_TRIAL_PAUSE_MS = 5000;
+constexpr uint8_t RFID_FAST_SWITCH_REPEAT = 1;
 
 constexpr uint8_t RFID_FRAME_HEADER = 0xA0;
 constexpr uint8_t RFID_PUBLIC_ADDRESS = 0xFF;
@@ -80,8 +81,16 @@ size_t rfidUniqueTagCount = 0;
 uint8_t rfidReaderIdentifier[12] = {};
 bool rfidReaderReady = false;
 bool rfidTemperatureSafe = true;
-uint8_t rfidCompletedInventorySessions = 0;
-uint32_t rfidLastInventorySessionEndMs = 0;
+uint8_t rfidCurrentGen2Session = 0;
+uint8_t rfidCurrentInventoryTrial = 0;
+uint16_t rfidUniqueTagResults[RFID_GEN2_SESSION_COUNT]
+                             [RFID_INVENTORY_TRIALS_PER_SESSION] = {};
+uint32_t rfidCurrentAntennaReadCounts[RFID_ANTENNA_COUNT] = {};
+uint32_t rfidAntennaReadResults[RFID_ANTENNA_COUNT]
+                               [RFID_INVENTORY_TRIALS_PER_SESSION] = {};
+uint16_t rfidAntennaUniqueTagResults[RFID_ANTENNA_COUNT]
+                                    [RFID_INVENTORY_TRIALS_PER_SESSION] = {};
+uint32_t rfidLastInventoryTrialEndMs = 0;
 uint32_t rfidLastTemperatureCheckMs = 0;
 bool rfidInventoryRequested = false;
 bool rfidInventoryRunning = false;
@@ -132,11 +141,14 @@ bool readRfidReturnLoss(uint8_t& returnLossDb);
 bool scanRfidAntennas();
 uint8_t collectRfidPortsForGroup(uint8_t group, uint8_t* ports);
 void collectRfidTag(const uint8_t* frame, size_t length, uint8_t group);
+int compareRfidTagsByEpc(const RfidTag& left, const RfidTag& right);
+void sortRfidUniqueTags();
 bool runRfidFastSwitchInventory(uint8_t group, const uint8_t* ports,
-                                uint8_t portCount);
+                                uint8_t portCount, uint8_t gen2Session);
 void printRfidInventorySummary();
+void printRfidInventoryTestSummary();
 bool publishRfidInventoryData();
-void runRfidInventorySession();
+void runRfidInventoryTrial();
 bool configureRfidReader();
 
 void setup() {
@@ -169,7 +181,7 @@ void setup() {
 
   rfidReaderReady = true;
   rfidLastTemperatureCheckMs = millis();
-  rfidLastInventorySessionEndMs = millis() - RFID_INVENTORY_PAUSE_MS;
+  rfidLastInventoryTrialEndMs = millis() - RFID_INVENTORY_TRIAL_PAUSE_MS;
   Serial.println("[RFID] Czytnik gotowy do inwentaryzacji");
 }
 
@@ -213,9 +225,15 @@ void loop() {
     }
   }
   if (!rfidTemperatureSafe ||
-      now - rfidLastInventorySessionEndMs < RFID_INVENTORY_PAUSE_MS) {
+      now - rfidLastInventoryTrialEndMs < RFID_INVENTORY_TRIAL_PAUSE_MS) {
     delay(10);
     return;
+  }
+
+  if (rfidInventoryRequested && !rfidInventoryRunning) {
+    rfidInventoryRunning = true;
+    runRfidInventoryTrial();
+    rfidInventoryRunning = false;
   }
 }
 
@@ -340,10 +358,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   //obsluga tematu start
   if (strcmp(topic, startTopic) == 0 && length == 1 && payload[0] == '1') {
-    Serial.println("[MQTT] Przyjeto zadanie inwentaryzacji");
-
-    rfidCompletedInventorySessions = 0;
-    runRfidInventorySession();
+    if (rfidInventoryRequested || rfidInventoryRunning) {
+      Serial.println("[MQTT] Test sesji RFID jest juz uruchomiony");
+    } else {
+      Serial.println("[MQTT] Przyjeto zadanie testu sesji RFID S0");
+      rfidCurrentGen2Session = 0;
+      rfidCurrentInventoryTrial = 0;
+      memset(rfidUniqueTagResults, 0, sizeof(rfidUniqueTagResults));
+      memset(rfidAntennaReadResults, 0, sizeof(rfidAntennaReadResults));
+      memset(rfidAntennaUniqueTagResults, 0,
+             sizeof(rfidAntennaUniqueTagResults));
+      rfidInventoryRequested = true;
+    }
   }
 
   //obsluga tematu reset
@@ -727,6 +753,8 @@ void collectRfidTag(const uint8_t* frame, size_t length, uint8_t group) {
     return;
   }
 
+  ++rfidCurrentAntennaReadCounts[antennaNumber - 1];
+
   for (size_t i = 0; i < rfidUniqueTagCount; ++i) {
     if (rfidUniqueTags[i].epcLength == epcLength &&
         memcmp(rfidUniqueTags[i].epc, &frame[7], epcLength) == 0) {
@@ -746,8 +774,40 @@ void collectRfidTag(const uint8_t* frame, size_t length, uint8_t group) {
   tag.readCount = 1;
 }
 
+int compareRfidTagsByEpc(const RfidTag& left, const RfidTag& right) {
+  const size_t commonLength = left.epcLength < right.epcLength
+                                  ? left.epcLength
+                                  : right.epcLength;
+  const int comparison = memcmp(left.epc, right.epc, commonLength);
+  if (comparison != 0) {
+    return comparison;
+  }
+  if (left.epcLength < right.epcLength) {
+    return -1;
+  }
+  if (left.epcLength > right.epcLength) {
+    return 1;
+  }
+  return 0;
+}
+
+void sortRfidUniqueTags() {
+  for (size_t i = 1; i < rfidUniqueTagCount; ++i) {
+    const RfidTag currentTag = rfidUniqueTags[i];
+    size_t position = i;
+
+    while (position > 0 &&
+           compareRfidTagsByEpc(currentTag,
+                                rfidUniqueTags[position - 1]) < 0) {
+      rfidUniqueTags[position] = rfidUniqueTags[position - 1];
+      --position;
+    }
+    rfidUniqueTags[position] = currentTag;
+  }
+}
+
 bool runRfidFastSwitchInventory(uint8_t group, const uint8_t* ports,
-                                uint8_t portCount) {
+                                uint8_t portCount, uint8_t gen2Session) {
   if (portCount == 0) {
     return true;
   }
@@ -762,8 +822,8 @@ bool runRfidFastSwitchInventory(uint8_t group, const uint8_t* ports,
   }
   payload[16] = 0;  // Interval
   // payload[17..21] = Reserve0
-  payload[22] = 1;  // Session S1
-  payload[23] = 0;  // Target A
+  payload[22] = gen2Session;  // EPC Gen2 Session: 0=S0, 1=S1, 2=S2, 3=S3
+  payload[23] = 0;            // Inventoried Target A
   // payload[24..26] = Reserve1..3
   payload[27] = 0;  // Bez pomiaru fazy
   payload[28] = RFID_FAST_SWITCH_REPEAT;
@@ -854,12 +914,6 @@ bool publishRfidInventoryData() {
   }
 
   JsonDocument document;
-  document["tag_count"] = rfidUniqueTagCount;
-
-  JsonArray usedAntennas = document["used_antennas"].to<JsonArray>();
-  for (uint8_t i = 0; i < rfidDetectedAntennaCount; ++i) {
-    usedAntennas.add(rfidDetectedAntennas[i].number);
-  }
 
   JsonArray tags = document["tags"].to<JsonArray>();
   constexpr char hexDigits[] = "0123456789ABCDEF";
@@ -883,6 +937,13 @@ bool publishRfidInventoryData() {
     }
   }
 
+  JsonArray usedAntennas = document["used_antennas"].to<JsonArray>();
+  for (uint8_t i = 0; i < rfidDetectedAntennaCount; ++i) {
+    usedAntennas.add(rfidDetectedAntennas[i].number);
+  }
+
+  document["tag_count"] = rfidUniqueTagCount;
+
   String jsonPayload;
   serializeJson(document, jsonPayload);
   if (jsonPayload.length() + 1 > MQTT_BUFFER_SIZE) {
@@ -905,51 +966,144 @@ bool publishRfidInventoryData() {
   return true;
 }
 
-void runRfidInventorySession() {
-  const uint8_t sessionNumber = rfidCompletedInventorySessions + 1;
+void printRfidInventoryTestSummary() {
+  Serial.println("\n[RFID] Podsumowanie testu sesji EPC Gen2 S0:");
+  for (uint8_t session = 0; session < RFID_GEN2_SESSION_COUNT; ++session) {
+    uint32_t totalUniqueTags = 0;
+
+    Serial.print("[RFID] Session S");
+    Serial.print(session);
+    Serial.print(" - unikalne tagi: ");
+    for (uint8_t trial = 0; trial < RFID_INVENTORY_TRIALS_PER_SESSION; ++trial) {
+      if (trial > 0) {
+        Serial.print(", ");
+      }
+      const uint16_t result = rfidUniqueTagResults[session][trial];
+      Serial.print(result);
+      totalUniqueTags += result;
+    }
+
+    const float average = static_cast<float>(totalUniqueTags) /
+                          RFID_INVENTORY_TRIALS_PER_SESSION;
+    Serial.print("; srednia unikalnych tagow: ");
+    Serial.println(average, 2);
+  }
+
+  Serial.println("[RFID] Wyniki wedlug anten:");
+  for (uint8_t i = 0; i < rfidDetectedAntennaCount; ++i) {
+    const uint8_t antennaNumber = rfidDetectedAntennas[i].number;
+    const uint8_t antennaIndex = antennaNumber - 1;
+    uint32_t totalReads = 0;
+    uint32_t totalUniqueTags = 0;
+
+    Serial.print("[RFID] Antena ");
+    Serial.println(antennaNumber);
+    Serial.print("[RFID]   odczyty: ");
+    for (uint8_t trial = 0; trial < RFID_INVENTORY_TRIALS_PER_SESSION; ++trial) {
+      if (trial > 0) {
+        Serial.print(", ");
+      }
+      const uint32_t reads = rfidAntennaReadResults[antennaIndex][trial];
+      Serial.print(reads);
+      totalReads += reads;
+    }
+    Serial.print("; srednia: ");
+    Serial.println(static_cast<float>(totalReads) /
+                       RFID_INVENTORY_TRIALS_PER_SESSION,
+                   2);
+
+    Serial.print("[RFID]   unikalne tagi: ");
+    for (uint8_t trial = 0; trial < RFID_INVENTORY_TRIALS_PER_SESSION; ++trial) {
+      if (trial > 0) {
+        Serial.print(", ");
+      }
+      const uint16_t uniqueTags =
+          rfidAntennaUniqueTagResults[antennaIndex][trial];
+      Serial.print(uniqueTags);
+      totalUniqueTags += uniqueTags;
+    }
+    Serial.print("; srednia: ");
+    Serial.println(static_cast<float>(totalUniqueTags) /
+                       RFID_INVENTORY_TRIALS_PER_SESSION,
+                   2);
+  }
+}
+
+void runRfidInventoryTrial() {
+  const uint8_t gen2Session = rfidCurrentGen2Session;
+  const uint8_t trialNumber = rfidCurrentInventoryTrial + 1;
   const uint32_t sessionStartedAt = millis();
 
-  Serial.print("\n[RFID] Start sesji inwentaryzacji ");
-  Serial.print(sessionNumber);
+  Serial.print("\n[RFID] Start proby ");
+  Serial.print(trialNumber);
   Serial.print('/');
-  Serial.print(RFID_INVENTORY_SESSION_COUNT);
+  Serial.print(RFID_INVENTORY_TRIALS_PER_SESSION);
+  Serial.print(" dla Session S");
+  Serial.print(gen2Session);
   Serial.print(" (czas ");
-  Serial.print(RFID_INVENTORY_SESSION_DURATION_MS / 1000);
+  Serial.print(RFID_INVENTORY_TRIAL_DURATION_MS / 1000);
   Serial.println(" s)");
 
   rfidUniqueTagCount = 0;
+  memset(rfidCurrentAntennaReadCounts, 0,
+         sizeof(rfidCurrentAntennaReadCounts));
 
-  while (millis() - sessionStartedAt < RFID_INVENTORY_SESSION_DURATION_MS) {
+  while (millis() - sessionStartedAt < RFID_INVENTORY_TRIAL_DURATION_MS) {
     for (uint8_t group = 0; group < RFID_ANTENNA_GROUP_COUNT; ++group) {
       uint8_t ports[RFID_ANTENNAS_PER_GROUP];
       const uint8_t portCount = collectRfidPortsForGroup(group, ports);
-      if (!runRfidFastSwitchInventory(group, ports, portCount)) {
+      if (!runRfidFastSwitchInventory(group, ports, portCount, gen2Session)) {
         Serial.print("[RFID] Inwentaryzacja grupy ");
         Serial.print(group);
         Serial.println(" nie powiodla sie");
       }
 
-      if (millis() - sessionStartedAt >= RFID_INVENTORY_SESSION_DURATION_MS) {
+      if (millis() - sessionStartedAt >= RFID_INVENTORY_TRIAL_DURATION_MS) {
         break;
       }
     }
   }
 
-  ++rfidCompletedInventorySessions;
-  rfidLastInventorySessionEndMs = millis();
-  Serial.print("[RFID] Koniec sesji ");
-  Serial.println(sessionNumber);
+  sortRfidUniqueTags();
+  rfidUniqueTagResults[gen2Session][rfidCurrentInventoryTrial] =
+      static_cast<uint16_t>(rfidUniqueTagCount);
+  for (uint8_t antenna = 0; antenna < RFID_ANTENNA_COUNT; ++antenna) {
+    uint16_t uniqueTags = 0;
+    const uint16_t antennaMask = static_cast<uint16_t>(1U << antenna);
+    for (size_t tag = 0; tag < rfidUniqueTagCount; ++tag) {
+      if (rfidUniqueTags[tag].antennaMask & antennaMask) {
+        ++uniqueTags;
+      }
+    }
+    rfidAntennaReadResults[antenna][rfidCurrentInventoryTrial] =
+        rfidCurrentAntennaReadCounts[antenna];
+    rfidAntennaUniqueTagResults[antenna][rfidCurrentInventoryTrial] =
+        uniqueTags;
+  }
+  rfidLastInventoryTrialEndMs = millis();
+  Serial.print("[RFID] Koniec proby ");
+  Serial.print(trialNumber);
+  Serial.print(" dla Session S");
+  Serial.println(gen2Session);
   printRfidInventorySummary();
   rfidInventoryDataPending = true;
   if (client.connected() && publishRfidInventoryData()) {
     rfidInventoryDataPending = false;
   }
 
-  if (rfidCompletedInventorySessions >= RFID_INVENTORY_SESSION_COUNT) {
-    Serial.println("[RFID] Wszystkie zaplanowane sesje zakonczone. Skanowanie zatrzymane.");
+  ++rfidCurrentInventoryTrial;
+  if (rfidCurrentInventoryTrial >= RFID_INVENTORY_TRIALS_PER_SESSION) {
+    rfidCurrentInventoryTrial = 0;
+    ++rfidCurrentGen2Session;
+  }
+
+  if (rfidCurrentGen2Session >= RFID_GEN2_SESSION_COUNT) {
+    rfidInventoryRequested = false;
+    printRfidInventoryTestSummary();
+    Serial.println("[RFID] Wszystkie proby zakonczone. Skanowanie zatrzymane.");
   } else {
-    Serial.print("[RFID] Przerwa przed kolejna sesja: ");
-    Serial.print(RFID_INVENTORY_PAUSE_MS / 1000);
+    Serial.print("[RFID] Przerwa przed kolejna proba: ");
+    Serial.print(RFID_INVENTORY_TRIAL_PAUSE_MS / 1000);
     Serial.println(" s");
   }
 }
